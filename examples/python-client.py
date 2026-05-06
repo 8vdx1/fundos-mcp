@@ -6,15 +6,83 @@ Get a token: https://kela.com/oauth/authorize?client_id=mcp-generic
 Or use an API key from: https://kela.com/admin/api-keys
 """
 
+import hashlib
+import hmac
+import json
+
 import httpx
 
 FUNDOS_MCP_URL = "https://kela.com/mcp"
+FUNDOS_API_URL = "https://kela.com/api/v1"
 ACCESS_TOKEN = "your-oauth-token-here"  # or vdr_<api-key>
 
 headers = {
     "Authorization": f"Bearer {ACCESS_TOKEN}",
     "Content-Type": "application/json",
 }
+
+
+# ── Webhook helpers ────────────────────────────────────────────────────────────
+
+def verify_fundos_signature(raw_body: bytes, signature_header: str, secret: str) -> bool:
+    """Verify an inbound X-FundOS-Signature header on your receiving endpoint."""
+    expected = "sha256=" + hmac.new(
+        secret.encode("utf-8"), raw_body, hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(expected.encode(), signature_header.encode())
+
+
+def register_webhook(url: str, event_types: list | None = None, name: str = "") -> dict:
+    """Register a webhook endpoint.  Returns the endpoint record (including secret)."""
+    resp = httpx.post(
+        f"{FUNDOS_API_URL}/webhooks/",
+        headers=headers,
+        json={"url": url, "name": name, "event_types": event_types},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def list_webhooks() -> list:
+    resp = httpx.get(f"{FUNDOS_API_URL}/webhooks/", headers=headers, timeout=15)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def webhook_deliveries(endpoint_id: int, page: int = 1) -> dict:
+    resp = httpx.get(
+        f"{FUNDOS_API_URL}/webhooks/{endpoint_id}/deliveries",
+        headers=headers,
+        params={"page": page},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+# ── Example: register and handle webhooks ─────────────────────────────────────
+
+# 1. Register an endpoint (run once, save the returned secret securely)
+# endpoint = register_webhook(
+#     url="https://my-agent.example.com/hooks/fundos",
+#     event_types=["credit.low", "action.approval_required", "action.approved"],
+#     name="My agent listener",
+# )
+# MY_WEBHOOK_SECRET = endpoint["secret"]  # SAVE THIS — only shown at creation
+
+# 2. In your Flask/FastAPI receiver:
+#
+# @app.post("/hooks/fundos")
+# def receive(request: Request):
+#     raw = request.body()
+#     sig = request.headers.get("X-FundOS-Signature", "")
+#     if not verify_fundos_signature(raw, sig, MY_WEBHOOK_SECRET):
+#         raise HTTPException(401)
+#     event = json.loads(raw)
+#     delivery_id = event["delivery_id"]   # stable UUID across retries — deduplicate here
+#     print(f"Received {event['event']} delivery_id={delivery_id}")
+#     return {"ok": True}
 
 
 def call_tool(name: str, arguments: dict = None) -> dict:
